@@ -43,10 +43,11 @@ CFG_maxpoints        = {'sensor': 50000, 'beats': 10000, 'IBI': 10000} # max dat
 CFG_default_y        = {'sensor': 500.007007, 'beats': 0.007007, 'IBI': 500.007007}   # i use some special values so that I know afterwards that these are the default values (a bit of a dirty hack)
 CFG_default_y        = {'sensor': None, 'beats': None, 'IBI': None}   # i use some special values so that I know afterwards that these are the default values (a bit of a dirty hack)
 
+CFG_update_intervall = 20          # updates the graph every .. milliseconds
 CFG_max_runtime = 240              # stops after so many seconds
 CFG_max_measurement_runtime = 120  # stops after so many seconds (after first beat was detected)
 CFG_initial_wait = 5               # wait 5 seconds before doing anything
-CFG_update_hrv_every = 10       # update hrv descriptors every n hear beats
+CFG_update_hrv_every = 10          # update hrv descriptors every n hear beats
 
 CFG_graph_span_min   = 0.15   # x axis span of the graph in minutes
 
@@ -438,7 +439,7 @@ def main():
     hrvplot = HRVplot(CFG_comport, CFG_baudrate, CFG_serial_timeout)
  
     hrvplot.update(0)
-    anim = animation.FuncAnimation(hrvplot.fig, hrvplot.update, interval=50, blit=False)
+    anim = animation.FuncAnimation(hrvplot.fig, hrvplot.update, interval=CFG_update_intervall, blit=False)
     plt.show()
 
     hrvplot.close()
