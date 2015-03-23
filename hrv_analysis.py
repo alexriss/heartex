@@ -1,10 +1,12 @@
 ####
 # code to calculate HRV descriptors
 #
-# based on  gHRV: a graphical application for Heart Rate Variability analysis, Copyright (C) 2013  Milegroup - Dpt. Informatics, University of Vigo - Spain, www.milegroup.net
-# Authors: Leandro Rodríguez-Liñares, Arturo Méndez, María José Lado, Xosé Antón Vila
+# based on 
+# gHRV: a graphical application for Heart Rate Variability analysis
+#   Copyright (C) 2015  Milegroup - Dpt. Informatics, University of Vigo - Spain, www.milegroup.net
+#   Authors: Leandro Rodríguez-Liñares, Arturo Méndez, María José Lado, Xosé Antón Vila
 #
-# adapted by A. Riss, 2014
+# adapted by A. Riss, 2015
 #
 ####
 
@@ -31,6 +33,7 @@ class HRVdescriptors():
         powerinband = np.sum(band)/(2*len(spec)**2)
         return powerinband
 
+
     def calculate(self, IBI):
         """ calculates HRV descriptors from an array of inter-beat-intervals (in ms)
         returns a dictionary with:
@@ -47,8 +50,6 @@ class HRVdescriptors():
             FracDim
         """
         
-        #signal=1000/(self.data["HR"]/60.0) # msec.   / old code, left if we need to check later / Alex
-        
         if len(IBI)<2: return False
         
         result = {}
@@ -64,7 +65,8 @@ class HRVdescriptors():
         IBI_interp = interp_IBI(time_axis_interp)
         HR_interp = interp_HR(time_axis_interp)
 
-        spec_tmp = np.absolute(np.fft.fft(IBI_interp))**2
+        #spec_tmp = np.absolute(np.fft.fft(IBI_interp))**2
+        spec_tmp = np.absolute(np.fft.fft(IBI))**2
         spec = spec_tmp[0:(len(spec_tmp)/2)] # Only positive half of spectrum
 
         freqs = np.linspace(start=0,stop=CFG_interpolate_freq/2,num=len(spec),endpoint=True)
@@ -89,7 +91,7 @@ class HRVdescriptors():
         result["rMSSD"] = np.sqrt(np.mean(RRDiffs**2))
 
         if False:  # non-linear stuff does not work yet, let's deal with it later / Alex
-            BeatsFrame = time_axis / 1000  # I think that should be the BeatsFrane / Alex
+            BeatsFrame = time_axis / 1000  # I think that should be the BeatsFrame / Alex
             ApEn, FracDim = self.CalculateNonLinearAnalysis(BeatsFrame)
             result["ApEn"] = ApEn
             result["FracDim"] = FracDim

@@ -1,7 +1,21 @@
 ####
 #
-# program to read heart rate data from a COM port ((from pulse sensor via Arduino, see http://pulsesensor.myshopify.com/)
-#
+# program to read heart rate data from a COM port (from pulse sensor via Arduino, see http://pulsesensor.myshopify.com/)
+# Copyright (C) 2015 Alex Riss
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.#
+
 # the x-axis is just taken from the current computer time.
 # this can be improved when ones takes the time from arduino (either by sending time date from the arduino, or just using the IBI values (they provide time deltas between data points))
 #
@@ -14,7 +28,6 @@
 # todo:
 #   - real time axis (plot/input of data is now tied to current local time, should be tied to microprocessor time)
 #
-# A. Riss, 2014
 #
 ####
 
@@ -30,7 +43,10 @@ CFG_maxpoints        = {'sensor': 50000, 'beats': 10000, 'IBI': 10000} # max dat
 CFG_default_y        = {'sensor': 500.007007, 'beats': 0.007007, 'IBI': 500.007007}   # i use some special values so that I know afterwards that these are the default values (a bit of a dirty hack)
 CFG_default_y        = {'sensor': None, 'beats': None, 'IBI': None}   # i use some special values so that I know afterwards that these are the default values (a bit of a dirty hack)
 
-CFG_max_runtime = 120  # stops after so many seconds
+CFG_max_runtime = 240              # stops after so many seconds
+CFG_max_measurement_runtime = 120  # stops after so many seconds (after first beat was detected)
+CFG_initial_wait = 5               # wait 5 seconds before doing anything
+CFG_update_hrv_every = 10       # update hrv descriptors every n hear beats
 
 CFG_graph_span_min   = 0.15   # x axis span of the graph in minutes
 
@@ -46,10 +62,6 @@ CFG_plot_color    = {'HR': '#A53935', 'IBI': '#00695C', 'HRV_descriptors': '#3F5
 CFG_title_fontsize = 16
 CFG_title_color = '#000000'
 
-CFG_no_arduino = True   # do not connect to arduino, read data from file (for testing)
-CFG_save_dump = False     # save arduino data to file (for later offline testing)
-CFG_temp_file = 'temp.txt'  # store temp data here (if we do not want to re-record from arduino)
-
 CFG_hrv_descriptors = ['HRMean', 'HRSTD', 'rMSSD', 'pNN50', 'VLF', 'LF', 'HF', 'LFHF', 'Power']  # gives the order
 CFG_hrv_descriptors_labels = {'HRMean': 'HR Mean', 'HRSTD': 'HR STD', 'rMSSD': 'rMSSD', 'pNN50': 'pNN50', 'VLF': 'VLF', 'LF': 'LF', 'HF': 'HF', 'LFHF': 'LFHF', 'Power': 'Power'}
 CFG_hrv_descriptors_units = {'HRMean': 'Hz', 'HRSTD': 'Hz', 'rMSSD': 'ms', 'pNN50': '%', 'VLF': 'ms2', 'LF': 'ms2', 'HF': 'ms2', 'LFHF': '', 'Power': 'ms2'}
@@ -57,6 +69,13 @@ CFG_hrv_descriptors_format = {'HRMean': '%0.1f', 'HRSTD': '%0.1f', 'rMSSD': '%0.
 CFG_hrv_descriptors_standard = {'HRMean': 75, 'HRSTD': 4, 'rMSSD': 51.7, 'pNN50': 12.3, 'VLF': 2437.2, 'LF': 2234.3, 'HF': 1442.6, 'LFHF': 1.75, 'Power': 6120.2}  # standard values for hrv descriptors (from http://www.hrv24.de/HRV-Interpretation.htm), HRSTD is made up
 
 CFG_hrv_descriptors_log_base = 4  # for dynamic adjustment of bar plot  for hrv descriptors
+
+CFG_save_history = True
+CFG_filename_history = "hrv_data.xlsx"
+
+CFG_no_arduino = False   # do not connect to arduino, read data from file (for testing)
+CFG_save_dump = False     # save arduino data to file (for later offline testing)
+CFG_temp_file = 'temp.txt'  # store temp data here (if we do not want to re-record from arduino)
 
 
 import serial
@@ -67,6 +86,10 @@ import matplotlib.dates
 import datetime
 import pickle
 import math
+import os.path
+import threading
+import openpyxl
+
 
 import hrv_analysis
 
@@ -83,9 +106,14 @@ class HRVplot:
         self.y = {}
         self.date_start = datetime.datetime.now()
         self.date_start_num = matplotlib.dates.date2num(self.date_start)
+        self.date_start_measurement = datetime.datetime.now()  # start of the measurement (will be set when first inter-beat-distance is detected)
         
-        self.hrv_descriptors = []  # list of all past dictionaries
+        self.run_ended = False  # will be set to true when the measurement is done
+        
+        self.hrv_descriptors = {}  # current set calculated of HRV descriptors
         self.hrv_descriptors_plot_norm2 = {}  # normalize bar width (for plotting), defined in powers of CFG_hrv_descriptors_log_base
+        
+        self.thread_update_descriptors = threading.Thread(target=self.update_descriptors_thread)
         
         self.num_points = {'sensor': 0, 'beats': 0, 'IBI': 0}
 
@@ -98,13 +126,14 @@ class HRVplot:
         # setup figure/plots
         
         self.fig = plt.figure(num=None, figsize=CFG_figsize, facecolor='w', edgecolor='k')
+        self.fig.canvas.set_window_title('HeartRateEx')
         gs = matplotlib.gridspec.GridSpec(2, 2, width_ratios=[3,1.5], height_ratios=[1,1])
 
         self.ax = {}
         self.ax['sensor'] = self.fig.add_subplot(gs[0,0], xlim=(self.date_start_num, self.date_start_num+1.0/24/60/60), ylim=(0, 1023))    # 1 second span in for the x-axis
         self.ax['sensor'].xaxis_date()
         #self.ax['beats'] = plt.axes(xlim=(0, CFG_maxpoints_beats), ylim=(0, 220))
-        self.ax['IBI']    = self.fig.add_subplot(gs[1,0], sharex=self.ax['sensor'], ylim=(0, 1000))
+        self.ax['IBI']    = self.fig.add_subplot(gs[1,0], sharex=self.ax['sensor'], ylim=(600, 800))
         
         self.ax['HRV_descriptors'] = self.fig.add_subplot(gs[:,1])
         
@@ -113,8 +142,8 @@ class HRVplot:
         #self.plots['beats'],  = self.ax['beats'].plot(self.x['beats'], self.y['beats'])
         self.plots['IBI'],    = self.ax['IBI'].plot(self.x['IBI'], self.y['IBI'], color=CFG_plot_color['IBI'], linewidth=2)
         
-        dummy_plot, = self.ax['sensor'].plot(self.date_start_num, 500)  # some dummy plot to prevent scaling errors before any real data exists
-        dummy_plot2, = self.ax['IBI'].plot(self.date_start_num, 500)  # some dummy plot to prevent scaling errors before any real data exists
+        dummy_plot, = self.ax['sensor'].plot(self.date_start_num, 500)  # some dummy plot to prevent scaling errors before any real data exists, will be removed later
+        dummy_plot2, = self.ax['IBI'].plot(self.date_start_num, 800)
 
         # setup captions
         
@@ -200,7 +229,7 @@ class HRVplot:
         
    
     def _on_xlim_changed(self, ax, min_y=None, max_y=None):
-        """autoscale y-axis according to current x-axis limits, taken from stackoverflow"""
+        """autoscale y-axis according to current x-axis limits, based on stackoverflow code"""
         xlim = ax.get_xlim()
         for a in ax.figure.axes:
             # shortcuts: last avoids n**2 behavior when each axis fires event
@@ -230,12 +259,12 @@ class HRVplot:
             a.xlim = xlim
             
 
-    def update_descriptors(self):
+    def update_descriptors_thread(self):
         """calculates and updates HRV descriptors"""
         
         hrv = hrv_analysis.HRVdescriptors()
         r = hrv.calculate(self.y['IBI'][:self.num_points['IBI']])
-        self.hrv_descriptors.append(r)  # this list is not used right now
+        self.hrv_descriptors = r  # this list is not used right now
         
         pos = range(len(CFG_hrv_descriptors))
         vals = []
@@ -248,15 +277,25 @@ class HRVplot:
             vals.append(val / CFG_hrv_descriptors_log_base**(self.hrv_descriptors_plot_norm2[k]))
             self.hrv_text[k].set_text(CFG_hrv_descriptors_format[k] % r[k])
             self.hrv_text[k].set_position((vals[-1] - 0.05, pos[len(vals)-1]))
-            self.hrv_text_norm[k].set_text("**%d" % self.hrv_descriptors_plot_norm2[k])
+            self.hrv_text_norm[k].set_text("**%0.0f" % self.hrv_descriptors_plot_norm2[k])
     
         for rect, val in zip(self.plots['HRV_descriptors'], vals):
             rect.set_width(val)
-
+    
+    
+    def update_descriptors(self):
+        """starts thread to calculate and update HRV descriptors"""
+        
+        if not self.thread_update_descriptors.isAlive():
+            self.thread_update_descriptors = threading.Thread(target=self.update_descriptors_thread)
+            self.thread_update_descriptors.start()
         
 
+    #@profile    # for line-profiling
     def update(self, frameNum):
         """reads date from serial connection and updates the plot""" 
+        
+        if self.run_ended: return False
         
         update_artists = [self.ax['sensor'], self.ax['IBI'], self.ax['HRV_descriptors']]  # will be return to the animation task, for update, we need a few more if we want to use blit
 
@@ -284,6 +323,8 @@ class HRVplot:
             
         for line in arduino_input.split("\r\n"):
             if len(line)<2: return update_artists
+            elapsed = (now-self.date_start).seconds
+            if elapsed<CFG_initial_wait: return update_artists
             
             sym = line[0]
             if sym in symbols:
@@ -308,22 +349,35 @@ class HRVplot:
                         self.text_HR_mean_10.set_text(int(self.y['beats'][self.num_points['beats']-1]))
                         self.text_HR_mean_all.set_text(int(np.mean(60000.0/self.y['IBI'][:self.num_points['IBI']])))
                         
-                        if self.num_points['IBI']>1: self.update_descriptors()  # calculates and updates HRV descriptors
+                        if self.num_points['IBI']>1:
+                            if (self.num_points['IBI'] % CFG_update_hrv_every ==0):
+                                self.update_descriptors()  # calculates and updates HRV descriptors
+                        if self.num_points['IBI']==1:
+                            self.date_start_measurement=now
+                            self.ax['IBI'].lines.pop(1)  # remove dummy plots
+                            self.ax['sensor'].lines.pop(1)
                    
-                    elapsed = (now-self.date_start).seconds
-                    if elapsed < 3600:
-                        elapsed_str = '{:02}:{:02}'.format(elapsed % 3600 // 60, elapsed % 60)
+                    if self.num_points['IBI']>1:
+                        elasped_measurement = (now-self.date_start_measurement).seconds
                     else:
-                        elapsed_str = '{:02}:{:02}:{:02}'.format(elapsed // 3600, elapsed % 3600 // 60, elapsed % 60)
+                        elasped_measurement = 0
+                    if elapsed < 3600:
+                        elapsed_str = '{:02}:{:02}'.format(elasped_measurement % 3600 // 60, elasped_measurement % 60)
+                    else:
+                        elapsed_str = '{:02}:{:02}:{:02}'.format(elasped_measurement // 3600, elasped_measurement % 3600 // 60, elasped_measurement % 60)
                     self.text_time.set_text("Elapsed time: %s" % elapsed_str)
                     
                     maxpoints_exceeded=False
                     for s in symbols.values():
                         if self.num_points[s] >= CFG_maxpoints[s]:
                             maxpoints_exceeded=True
-                    if  (elapsed > CFG_max_runtime or maxpoints_exceeded):
+                    if  (elapsed > CFG_max_runtime or elasped_measurement > CFG_max_measurement_runtime or maxpoints_exceeded):
+                        self.update_descriptors()  # let's do it one last time
+                        self.run_ended = True
                         if CFG_save_dump: pickle.dump({'IBI': self.y['IBI'][:self.num_points[symbols[sym]]], 'lines': self.lines}, open(CFG_temp_file, "wb" ))
-                        self.close()
+                        if CFG_save_history:
+                            self.save_history(CFG_filename_history)
+                        break
                     
         # update graph limits/scale
         if self.num_points['sensor'] == 0: return update_artists
@@ -336,9 +390,41 @@ class HRVplot:
         return update_artists
         
         
-    def showplot(self):
-        plt.show()
-   
+    def save_history(self, filename):
+        """appends HRV data to an excel file. creates the file if it does not exist (also creates the header row in that case)"""
+        if not os.path.isfile(filename):  # create file with default header
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = 'HRV History'
+            ws.cell(row = 1, column = 1).value = 'datetime'
+            i = 2
+            for key in CFG_hrv_descriptors:
+                ws.cell(row = 1, column = i).value = "%s [%s]" % (CFG_hrv_descriptors_labels[key], CFG_hrv_descriptors_units[key])
+                i+=1
+            ws.cell(row = 1, column = i).value = 'IBI data'
+            wb.save(filename)
+
+        wb = openpyxl.load_workbook(filename)
+        ws = wb.active
+        r = ws.max_row + 1
+        ws.cell(row = r, column = 1).value = self.date_start
+        i = 2
+        for key in CFG_hrv_descriptors:
+            if key in self.hrv_descriptors:
+                ws.cell(row = r, column = i).value = self.hrv_descriptors[key]
+            i+=1
+        arrstr = np.char.mod('%0.0f', self.y['IBI'][:self.num_points['IBI']])
+        ws.cell(row = r, column = i).value = ",".join(arrstr)
+        try:
+            wb.save(filename)
+            print("Written data to file: %s" % filename)
+        except PermissionError:
+            filename_new = "%s_%s.%s" % (os.path.splitext(filename)[0], datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") ,os.path.splitext(filename)[1])
+            wb.save(filename_new)   # save under a different filename
+            print("Written data to file: %s" % filename_new)
+        return True
+
+    
     # clean up
     def close(self):
         if not CFG_no_arduino:
@@ -352,7 +438,7 @@ def main():
     hrvplot = HRVplot(CFG_comport, CFG_baudrate, CFG_serial_timeout)
  
     hrvplot.update(0)
-    anim = animation.FuncAnimation(hrvplot.fig, hrvplot.update, interval=100, blit=False)
+    anim = animation.FuncAnimation(hrvplot.fig, hrvplot.update, interval=50, blit=False)
     plt.show()
 
     hrvplot.close()
